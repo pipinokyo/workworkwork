@@ -1,0 +1,114 @@
+name: CD Deploy
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - stage
+      - prod
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy on merged PR to stage/prod
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+
+    defaults:
+      run:
+        working-directory: ./codebase/rdicidr-0.1.0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine environment
+        run: |
+          TARGET_BRANCH='${{ github.event.pull_request.base.ref }}'
+          if [ "$TARGET_BRANCH" = "prod" ]; then
+            echo "ENVIRONMENT=prod" >> $GITHUB_ENV
+          else
+            echo "ENVIRONMENT=stage" >> $GITHUB_ENV
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ">=15.0.0 <16.0.0"
+
+      - name: Install deps and build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: us-east-1
+
+      - name: Print effective AWS region
+        run: |
+          echo "Using AWS region: ${AWS_REGION:-(not set)}"
+
+      - name: Verify AWS identity (sts:get-caller-identity)
+        run: |
+          echo "Checking AWS caller identity to verify credentials..."
+          aws sts get-caller-identity || (
+            echo "ERROR: aws sts get-caller-identity failed. Check OIDC role, role ARN in secret AWS_ROLE_TO_ASSUME, and that 'id-token: write' permission is set at workflow level.";
+            exit 1
+          )
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: '1.5.0'
+          terraform_wrapper: false
+
+      - name: Terraform init & apply
+        working-directory: ./codebase/rdicidr-0.1.0/terraform
+        env:
+          TF_VAR_environment: ${{ env.ENVIRONMENT }}
+          TF_VAR_bucket_name: "cuneyt-devops-challenge"
+        run: |
+          terraform init \
+            -backend-config="bucket=cuneyt-devops-challenge" \
+            -backend-config="key=terraform/state/${{ env.ENVIRONMENT }}.tfstate" \
+            -backend-config="region=us-east-1" \
+            -backend-config="encrypt=true" \
+            -input=false
+          terraform apply -auto-approve -input=false
+          
+          echo "TF_APP_BUCKET=$(terraform output -raw app_bucket_name)" >> $GITHUB_ENV
+          echo "TF_CF_ID=$(terraform output -raw cloudfront_distribution_id)" >> $GITHUB_ENV
+
+      - name: Upload build to S3
+        run: |
+          BUILD_DIR=./build
+          if [ ! -d "$BUILD_DIR" ]; then
+            echo "Build directory missing: $BUILD_DIR"
+            exit 1
+          fi
+          echo "Uploading build to s3://${{ env.TF_APP_BUCKET }}"
+          aws s3 sync "$BUILD_DIR" "s3://${{ env.TF_APP_BUCKET }}" --delete
+
+      - name: Invalidate CloudFront
+        run: |
+          if [ -z "${{ env.TF_CF_ID }}" ]; then
+            echo "No CloudFront distribution id found from Terraform outputs"
+            exit 0
+          fi
+          echo "Creating CloudFront invalidation for ${{ env.TF_CF_ID }}"
+          aws cloudfront create-invalidation --distribution-id "${{ env.TF_CF_ID }}" --paths "/*"
+
+      - name: Print CloudFront URL
+        run: |
+          if [ -z "${{ env.TF_CF_ID }}" ]; then
+            echo "No CloudFront distribution id available"
+            exit 0
+          fi
+          DIST=$(aws cloudfront get-distribution --id "${{ env.TF_CF_ID }}" --query 'Distribution.DomainName' --output text)
+          echo "CloudFront URL: https://$DIST"
