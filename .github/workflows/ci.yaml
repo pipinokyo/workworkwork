@@ -16,8 +16,8 @@ jobs:
 
     steps:
       - run: |
-          TARGET="${{github.base.ref}}"
-          SOURCE="${{github.head.ref}}"
+          TARGET="${{ github.base_ref }}"
+          SOURCE="${{ github.head_ref }}"
 
           if [[ "$TARGET" == "devel" && "$SOURCE" != "devel" && "$SOURCE" != "stage" && "$SOURCE" != "prod" ]]; then
             echo "✅ Allowed: $SOURCE → $TARGET"
