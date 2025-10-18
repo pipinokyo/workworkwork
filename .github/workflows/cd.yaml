@@ -27,12 +27,7 @@ jobs:
 
       - name: Determine environment
         run: |
-          TARGET_BRANCH='${{ github.event.pull_request.base.ref }}'
-          if [ "$TARGET_BRANCH" = "prod" ]; then
-            echo "ENVIRONMENT=prod" >> $GITHUB_ENV
-          else
-            echo "ENVIRONMENT=stage" >> $GITHUB_ENV
-          fi
+          echo "ENVIRONMENT=${{ github.event.pull_request.base.ref }}" >> $GITHUB_ENV
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -87,28 +82,13 @@ jobs:
 
       - name: Upload build to S3
         run: |
-          BUILD_DIR=./build
-          if [ ! -d "$BUILD_DIR" ]; then
-            echo "Build directory missing: $BUILD_DIR"
-            exit 1
-          fi
-          echo "Uploading build to s3://${{ env.TF_APP_BUCKET }}"
-          aws s3 sync "$BUILD_DIR" "s3://${{ env.TF_APP_BUCKET }}" --delete
+          aws s3 sync ./build "s3://${{ env.TF_APP_BUCKET }}" --delete
 
       - name: Invalidate CloudFront
         run: |
-          if [ -z "${{ env.TF_CF_ID }}" ]; then
-            echo "No CloudFront distribution id found from Terraform outputs"
-            exit 0
-          fi
-          echo "Creating CloudFront invalidation for ${{ env.TF_CF_ID }}"
           aws cloudfront create-invalidation --distribution-id "${{ env.TF_CF_ID }}" --paths "/*"
 
       - name: Print CloudFront URL
         run: |
-          if [ -z "${{ env.TF_CF_ID }}" ]; then
-            echo "No CloudFront distribution id available"
-            exit 0
-          fi
           DIST=$(aws cloudfront get-distribution --id "${{ env.TF_CF_ID }}" --query 'Distribution.DomainName' --output text)
           echo "CloudFront URL: https://$DIST"
